@@ -1,0 +1,8 @@
+[package]
+name = "projman"
+version = "0.1.0"
+authors = ["steven"]
+
+[dependencies]
+nix = "0.10.0"
+json = "*"
