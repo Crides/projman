@@ -1,91 +1,122 @@
-use nix::sys::termios::*;
-use nix::libc::{VMIN, VTIME, getchar};
+use std::io::{stdout, Write};
+use pancurses::*;
+use regex::Regex;
+use std::ptr::null_mut;
 
 pub enum TermMode {
     Cmd,
     Norm,
 }
 
-#[derive(Debug)]
-pub struct WinSize {
-    row: u16,
-    col: u16,
-    xpixel: u16,
-    ypixel: u16,
-}
-
-impl WinSize {
-    pub fn new() -> Self {
-        Self {
-            row: 0,
-            col: 0,
-            xpixel: 0,
-            ypixel: 0,
-        }
-    }
-}
-
 pub struct TermWin {
-    old_state: Termios,
+    win: Window,
     mode: TermMode,
-    pub size: WinSize,
-}
+    vdiv_pos: i32,
 
-ioctl!(bad read _term_size with 0x5413; WinSize);
+    pub lpad: Window,
+    pub rpad: Window,
+}
 
 impl TermWin {
+    pub const MIN_ROW: i32 = 12;
+    pub const MIN_COL: i32 = 50;
+
     pub fn new() -> Self {
-        let old_state = tcgetattr(0).unwrap();
-        let mut win_size = WinSize::new();
-        unsafe {
-            _term_size(0, &mut win_size);
+        let window = initscr();
+        window.keypad(true);
+        mousemask(ALL_MOUSE_EVENTS, null_mut()); // Listen to all mouse events
+        noecho();
+        curs_set(0);
+        print!("[?1002h[?1006h");           // Turn on button event tracking; extended mode
+
+        // Initialize colors
+        start_color();
+        use_default_colors();
+        init_pair(0, -1, -1);
+        for i in 1..8 {
+            init_pair(i, i, -1);
         }
 
+        let vdiv_pos = window.get_max_x() / 3 * 2;
+        let lpad = window.subwin(window.get_max_y() - 4, vdiv_pos - 1, 2, 0).unwrap();
+        let rpad = window.subwin(window.get_max_y() - 4, window.get_max_x() - vdiv_pos - 1, 2, vdiv_pos + 1).unwrap();
         Self {
-            old_state: old_state,
+            win: window,
             mode: TermMode::Norm,
-            size: win_size,
+            vdiv_pos: vdiv_pos,
+            
+            lpad: lpad,//newpad(100, 100),
+            rpad: rpad,
         }
-    }
-
-    pub fn init(&self) {
-        print!("[s");             // Store cursor position
-        print!("[?1049h");        // Store window in buffer
-        print!("[2J");            // Clear screen
-
-        let mut new_state = self.old_state.clone();
-        new_state.local_flags.remove(LocalFlags::ICANON);
-        new_state.local_flags.remove(LocalFlags::ECHO);
-        new_state.control_chars[VMIN] = 1;
-        new_state.control_chars[VTIME] = 0;
-        tcsetattr(0, SetArg::TCSANOW, &new_state);
     }
 
     pub fn finish(&self) {
-        tcsetattr(0, SetArg::TCSANOW, &self.old_state);
-
-        println!("[u");
-        print!("[?1049l");
+        print!("[?1002l[?1006l");
+        endwin();
     }
 
-    pub fn check_size(&self) -> Option<()> {
-        if self.size.row == 0 || self.size.col == 0 {
+    pub fn check_size(&self) -> bool {
+        let size = self.win.get_max_yx();
+        if size == (0, 0) {
             eprintln!("Cannot determin size of current window!");
-            return None;
+            return false;
         }
 
-        if self.size.row < 10 || self.size.col < 50 {
+        if size.0 < TermWin::MIN_ROW || size.1 < TermWin::MIN_COL {
             eprintln!("Terminal too small to be useful!");
-            eprintln!("Current size: {} rows, {} cols.", self.size.row, self.size.col);
-            return None;
+            eprintln!("Current size: {} rows, {} cols.", size.0, size.1);
+            return false;
         }
 
-        Some(())
+        true
     }
 
-    pub fn getch() -> char {
-        unsafe {
-            getchar() as u8 as char
+    pub fn draw_border(&self) {
+        self.win.mvprintw(0, 0, "    ");
+        self.win.attron(A_BOLD);
+        self.win.printw("Projman v0.1.0");
+        self.win.mv(1, 0);
+        self.win.hline('-', self.win.get_max_x());
+
+        self.win.mv(2, self.vdiv_pos);
+        self.win.vline('|', self.win.get_max_y() - 4);
+        self.win.mvprintw(1, self.vdiv_pos, "+");
+        self.win.attrset(A_NORMAL);
+    }
+    
+    pub fn getch(&self) -> Option<Input> {
+        self.win.getch()
+    }
+
+    pub fn printwc(w: &Window, s: &str) {        // Print string to window with correct colors
+        lazy_static! {
+            static ref CC_PAT: Regex = Regex::new(r"\[\d*m").unwrap();
+        }
+        let mut chunks = CC_PAT.split(s);
+        let mut codes = CC_PAT.find_iter(s);
+        w.printw(chunks.next().unwrap());
+        for (i, chunk) in chunks.enumerate() {
+            let code = codes.next().unwrap();
+            let color = code.as_str().get(3..4)
+                    .unwrap_or("")
+                    .parse::<u8>()
+                    .unwrap_or(0);
+            w.attrset(ColorPair(color));
+            w.addstr(chunk);
         }
     }
+
+    pub fn refresh(&self) {
+        self.lpad.prefresh(0, 0,
+                           2, 0,
+                           self.win.get_max_y() - 2, self.vdiv_pos - 1);    // FIXME
+        self.rpad.prefresh(0, 0,
+                           2, self.vdiv_pos + 1,
+                           self.win.get_max_y() - 2, self.win.get_max_x()); // FIXME
+        self.win.refresh();
+    }
+}
+
+pub fn flush_stdout() {
+    stdout().flush().unwrap();
 }

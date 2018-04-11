@@ -1,20 +1,37 @@
+extern crate regex;
+extern crate ncurses;
+extern crate pancurses;
+use pancurses::*;
 #[macro_use]
-extern crate nix;
+extern crate lazy_static;
+use std::process::Command;
+
 mod ui;
 use ui::*;
 
 fn main() {
-    let mut term = TermWin::new();
-    if let None = term.check_size() {
+    let term = TermWin::new();
+    if !term.check_size() {
+        term.finish();
         return;
     }
 
-    term.init();
-    println!("{:?}", term.size);
+    term.draw_border();
+    let output = Command::new("git")
+            .arg("-c")
+            .arg("color.ui=always")
+            .arg("status")
+            .output()
+            .unwrap();
+    TermWin::printwc(&term.rpad, &String::from_utf8_lossy(&output.stdout));
     loop {
-        let ch = TermWin::getch();
-        if ch == 'q' {
-            break;
+        match term.getch() {
+            Some(Input::Character(c)) => {
+                if c == 'q' {
+                    break;
+                }
+            },
+            _ => (),
         }
     }
     term.finish();
